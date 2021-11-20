@@ -2011,7 +2011,7 @@ static void aoc_did_become_online(struct work_struct *work)
 	aoc_state = AOC_STATE_ONLINE;
 
 	for (i = 0; i < s; i++)
-		device_register(&prvdata->services[i]->dev);
+		(void)device_register(&prvdata->services[i]->dev);
 
 err:
 	mutex_unlock(&aoc_service_lock);
