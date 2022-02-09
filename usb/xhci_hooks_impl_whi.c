@@ -47,6 +47,7 @@ static int xhci_sync_dev_ctx(struct xhci_hcd *xhci, unsigned int slot_id)
 	struct xhci_ep_ctx *ep_ctx;
 	struct get_dev_ctx_args args;
 	u8 *dev_ctx;
+	char                    str[XHCI_MSG_MAX];
 
 	if (IS_ERR_OR_NULL(xhci))
 		return -ENODEV;
@@ -82,11 +83,11 @@ static int xhci_sync_dev_ctx(struct xhci_hcd *xhci, unsigned int slot_id)
 	ep_ctx = xhci_get_ep_ctx(xhci, out_ctx_ref, 0); /* ep0 */
 
 	xhci_dbg(xhci, "%s\n",
-		 xhci_decode_slot_context(
+		 xhci_decode_slot_context(str,
 			 slot_ctx->dev_info, slot_ctx->dev_info2,
 			 slot_ctx->tt_info, slot_ctx->dev_state));
 	xhci_dbg(xhci, "%s\n",
-		 xhci_decode_ep_context(ep_ctx->ep_info, ep_ctx->ep_info2,
+		 xhci_decode_ep_context(str, ep_ctx->ep_info, ep_ctx->ep_info2,
 					ep_ctx->deq, ep_ctx->tx_info));
 
 	kfree(dev_ctx);
@@ -244,8 +245,15 @@ out:
 static struct xhci_hcd *get_xhci_hcd_by_udev(struct usb_device *udev)
 {
 	struct usb_hcd *uhcd = container_of(udev->bus, struct usb_hcd, self);
-
+	       if (uhcd == NULL) {
+               pr_err("xhciudev111\n");
+               goto skip;
+		   }
+	pr_err("xhciudev2\n");
 	return hcd_to_xhci(uhcd);
+	pr_err("xhciudev3\n");
+	skip:
+	return 0;
 }
 
 
@@ -343,16 +351,26 @@ static int xhci_udev_notify(struct notifier_block *self, unsigned long action,
 {
 	struct usb_device *udev = dev;
 	struct xhci_vendor_data *vendor_data;
-	struct xhci_hcd *xhci;
-
+	struct xhci_hcd *xhci = get_xhci_hcd_by_udev(udev);
+       if (xhci == NULL) {
+               dev_dbg(&udev->dev,"xhcinull?\n");
+               goto skip;
+       }
+pr_err("xhci1\n");
 	xhci = get_xhci_hcd_by_udev(udev);
+	       if (xhci == NULL) {
+               dev_dbg(&udev->dev,"xhcinull2?\n");
+               goto skip;
+		   }
+pr_err("xhci1.1\n");
 	vendor_data = xhci_to_priv(xhci)->vendor_data;
-
+pr_err("xhci2\n");
 	switch (action) {
 	case USB_DEVICE_ADD:
 		if (is_compatible_with_usb_audio_offload(udev)) {
 			dev_dbg(&udev->dev,
 				 "Compatible with usb audio offload\n");
+				 pr_err("xhci3\n");
 			xhci_reset_for_usb_audio_offload(udev);
 			if (vendor_data->op_mode ==
 			    USB_OFFLOAD_SIMPLE_AUDIO_ACCESSORY ||
@@ -360,10 +378,13 @@ static int xhci_udev_notify(struct notifier_block *self, unsigned long action,
 			    USB_OFFLOAD_DRAM) {
 				xhci_sync_conn_stat(udev->bus->busnum, udev->devnum, udev->slot_id,
 						    USB_CONNECTED);
+						    pr_err("xhci4\n");
 			}
 		}
 		vendor_data->usb_accessory_enabled = false;
+		pr_err("xhci5\n");
 		break;
+		pr_err("xhci6\n");
 	case USB_DEVICE_REMOVE:
 		if (is_compatible_with_usb_audio_offload(udev) &&
 		    (vendor_data->op_mode ==
@@ -373,11 +394,15 @@ static int xhci_udev_notify(struct notifier_block *self, unsigned long action,
 			xhci_sync_conn_stat(udev->bus->busnum, udev->devnum, udev->slot_id,
 					    USB_DISCONNECTED);
 		}
+		pr_err("xhci7\n");
 		vendor_data->usb_accessory_enabled = false;
 		break;
+		pr_err("xhci8\n");
 	}
-
+pr_err("xhci9\n");
 	return NOTIFY_OK;
+	skip:
+	return -EINVAL;
 }
 
 static struct notifier_block xhci_udev_nb = {
