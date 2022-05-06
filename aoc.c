@@ -211,6 +211,7 @@ struct sscd_info {
 	u16 seg_count;
 };
 
+static void trigger_aoc_ramdump(struct aoc_prvdata *prvdata);
 static void sscd_release(struct device *dev);
 
 static struct sscd_info sscd_info;
@@ -726,6 +727,10 @@ static u32 aoc_board_config_parse(struct device_node *node, u32 *board_id, u32 *
 			*board_id  = 0x30501;
 			*board_rev = 0x10000;
 			pr_info("AoC Platform: L10");
+		} else if (strncmp(board_cfg, "F10", 3) == 0) {
+			*board_id  = 0x30601;
+			*board_rev = 0x10000;
+			pr_info("AoC Platform: F10");
 		} else {
 			pr_err("Unable to identify AoC board configuration, check DT");
 			pr_info("Assuming R4/O6 board configuration");
@@ -2013,6 +2018,16 @@ static struct aoc_service_dev *create_service_device(struct aoc_prvdata *prvdata
 	return dev;
 }
 
+static void trigger_aoc_ramdump(struct aoc_prvdata *prvdata)
+{
+	struct mbox_chan *channel = prvdata->mbox_channels[15].channel;
+	static const uint32_t command[] = { 0, 0, 0, 0, 0x0deada0c, 0, 0, 0 };
+
+	dev_notice(prvdata->dev, "Attempting to force AoC coredump\n");
+
+	mbox_send_message(channel, (void *)&command);
+}
+
 static void signal_aoc(struct mbox_chan *channel)
 {
 #ifdef AOC_JUNO
@@ -2390,6 +2405,9 @@ static void aoc_process_services(struct aoc_prvdata *prvdata, int offset)
 	services = aoc_num_services();
 	for (i = 0; i < services; i++) {
 		service_dev = service_dev_at_index(prvdata, i);
+		if (!service_dev)
+			goto exit;
+
 		service = service_dev->service;
 		if (service_dev->mbox_index != offset)
 			continue;
@@ -2521,6 +2539,8 @@ static void aoc_watchdog(struct work_struct *work)
 	struct aoc_ramdump_header *ramdump_header =
 		(struct aoc_ramdump_header *)((unsigned long)prvdata->dram_virt +
 					      RAMDUMP_HEADER_OFFSET);
+	struct wakeup_source *ws =
+		wakeup_source_register(prvdata->dev, dev_name(prvdata->dev));
 	unsigned long ramdump_timeout;
 	unsigned long carveout_paddr_from_aoc;
 	unsigned long carveout_vaddr_from_aoc;
@@ -2541,16 +2561,24 @@ static void aoc_watchdog(struct work_struct *work)
 	sscd_info.seg_count = 0;
 
 	dev_err(prvdata->dev, "aoc watchdog triggered, generating coredump\n");
+	dev_err(prvdata->dev, "holding %s wakelock for 10 sec\n", ws->name);
+	pm_wakeup_ws_event(ws, 10000, true);
+
 	if (!sscd_pdata.sscd_report) {
 		dev_err(prvdata->dev, "aoc coredump failed: no sscd driver\n");
 		goto err_coredump;
 	}
 
+	/* If this was a true watchdog timeout, the AoC may still be running, so
+	 * the coredump will not be written.  Attempt to force a coredump by sending
+	 * a death message to the AoC to trigger a failure.
+	 */
+	trigger_aoc_ramdump(prvdata);
+
 	if (prvdata->ap_triggered_reset) {
 		prvdata->ap_triggered_reset = false;
 		snprintf(crash_info, RAMDUMP_SECTION_CRASH_INFO_SIZE - 1,
 			"AP Triggered Reset: %s", prvdata->ap_reset_reason);
-		goto coredump_submit;
 	}
 
 	ramdump_timeout = jiffies + (5 * HZ);
@@ -2561,9 +2589,15 @@ static void aoc_watchdog(struct work_struct *work)
 	}
 
 	if (!ramdump_header->valid) {
+		const char *crash_reason = (const char *)ramdump_header +
+			RAMDUMP_SECTION_CRASH_INFO_OFFSET;
+		bool crash_reason_valid = (strnlen(crash_reason,
+			RAMDUMP_SECTION_CRASH_INFO_SIZE) != 0);
+
 		dev_err(prvdata->dev, "aoc coredump timed out, coredump only contains DRAM\n");
-		strscpy(crash_info, "AoC Watchdog : coredump timeout",
-			RAMDUMP_SECTION_CRASH_INFO_SIZE);
+		snprintf(crash_info, RAMDUMP_SECTION_CRASH_INFO_SIZE,
+			"AoC watchdog : %s (incomplete)",
+			crash_reason_valid ? crash_reason : "unknown reason");
 	}
 
 	if (ramdump_header->valid && memcmp(ramdump_header, RAMDUMP_MAGIC, sizeof(RAMDUMP_MAGIC))) {
@@ -2591,10 +2625,12 @@ static void aoc_watchdog(struct work_struct *work)
 	}
 
 	if (ramdump_header->valid) {
+		const char *crash_reason = (const char *)ramdump_header +
+			RAMDUMP_SECTION_CRASH_INFO_OFFSET;
+
 		section_flags = ramdump_header->sections[RAMDUMP_SECTION_CRASH_INFO_INDEX].flags;
 		if (section_flags & RAMDUMP_FLAG_VALID)
-			strscpy(crash_info, (const char *)ramdump_header +
-				RAMDUMP_SECTION_CRASH_INFO_OFFSET, RAMDUMP_SECTION_CRASH_INFO_SIZE);
+			strscpy(crash_info, crash_reason, RAMDUMP_SECTION_CRASH_INFO_SIZE);
 		else
 			strscpy(crash_info, "AoC Watchdog : invalid crash info",
 				RAMDUMP_SECTION_CRASH_INFO_SIZE);
@@ -2610,7 +2646,6 @@ static void aoc_watchdog(struct work_struct *work)
 	sscd_info.segs[0].vaddr = (void *)carveout_vaddr_from_aoc;
 	sscd_info.seg_count = 1;
 
-coredump_submit:
 	/*
 	 * sscd_report() returns -EAGAIN if there are no readers to consume a
 	 * coredump. Retry sscd_report() with a sleep to handle the race condition
@@ -3011,7 +3046,10 @@ static int aoc_core_suspend(struct device *dev)
 	size_t total_services = aoc_num_services();
 	int i = 0;
 
-	mutex_lock(&aoc_service_lock);
+	atomic_inc(&prvdata->aoc_process_active);
+	if (aoc_state != AOC_STATE_ONLINE || work_busy(&prvdata->watchdog_work))
+		goto exit;
+
 	for (i = 0; i < total_services; i++) {
 		struct aoc_service_dev *s = service_dev_at_index(prvdata, i);
 
@@ -3019,8 +3057,9 @@ static int aoc_core_suspend(struct device *dev)
 			s->suspend_rx_count = aoc_service_slots_available_to_read(s->service,
 										  AOC_UP);
 	}
-	mutex_unlock(&aoc_service_lock);
 
+exit:
+	atomic_dec(&prvdata->aoc_process_active);
 	return 0;
 }
 
@@ -3030,7 +3069,10 @@ static int aoc_core_resume(struct device *dev)
 	size_t total_services = aoc_num_services();
 	int i = 0;
 
-	mutex_lock(&aoc_service_lock);
+	atomic_inc(&prvdata->aoc_process_active);
+	if (aoc_state != AOC_STATE_ONLINE || work_busy(&prvdata->watchdog_work))
+		goto exit;
+
 	for (i = 0; i < total_services; i++) {
 		struct aoc_service_dev *s = service_dev_at_index(prvdata, i);
 
@@ -3042,8 +3084,9 @@ static int aoc_core_resume(struct device *dev)
 					   dev_name(&s->dev), available);
 		}
 	}
-	mutex_unlock(&aoc_service_lock);
 
+exit:
+	atomic_dec(&prvdata->aoc_process_active);
 	return 0;
 }
 

@@ -76,6 +76,11 @@ static int snd_aoc_ctl_info(struct snd_kcontrol *kcontrol,
 		uinfo->count = NUM_OF_BUILTIN_MIC;
 		uinfo->value.integer.min = -1;
 		uinfo->value.integer.max = NUM_OF_BUILTIN_MIC - 1;
+	} else if (kcontrol->private_value == BUILDIN_US_MIC_CAPTURE_LIST) {
+		uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+		uinfo->count = NUM_OF_BUILTIN_MIC;
+		uinfo->value.integer.min = -1;
+		uinfo->value.integer.max = NUM_OF_BUILTIN_MIC - 1;
 	} else if (kcontrol->private_value == A2DP_ENCODER_PARAMETERS) {
 		uinfo->type = SNDRV_CTL_ELEM_TYPE_BYTES;
 		uinfo->count = sizeof(struct AUDIO_OUTPUT_BT_A2DP_ENC_CFG);
@@ -169,6 +174,42 @@ snd_aoc_buildin_mic_capture_list_ctl_put(struct snd_kcontrol *kcontrol,
 	for (i = 0; i < NUM_OF_BUILTIN_MIC; i++)
 		chip->buildin_mic_id_list[i] =
 			ucontrol->value.integer.value[i]; // geting power state;
+
+	mutex_unlock(&chip->audio_mutex);
+	return 0;
+}
+
+static int
+snd_aoc_buildin_us_mic_capture_list_ctl_get(struct snd_kcontrol *kcontrol,
+					 struct snd_ctl_elem_value *ucontrol)
+{
+	int i;
+	struct aoc_chip *chip = snd_kcontrol_chip(kcontrol);
+
+	if (mutex_lock_interruptible(&chip->audio_mutex))
+		return -EINTR;
+
+	for (i = 0; i < NUM_OF_BUILTIN_MIC; i++)
+		ucontrol->value.integer.value[i] =
+			chip->buildin_us_mic_id_list[i];
+
+	mutex_unlock(&chip->audio_mutex);
+	return 0;
+}
+
+static int
+snd_aoc_buildin_us_mic_capture_list_ctl_put(struct snd_kcontrol *kcontrol,
+					 struct snd_ctl_elem_value *ucontrol)
+{
+	int i;
+	struct aoc_chip *chip = snd_kcontrol_chip(kcontrol);
+
+	if (mutex_lock_interruptible(&chip->audio_mutex))
+		return -EINTR;
+
+	for (i = 0; i < NUM_OF_BUILTIN_MIC; i++)
+		chip->buildin_us_mic_id_list[i] =
+			ucontrol->value.integer.value[i];
 
 	mutex_unlock(&chip->audio_mutex);
 	return 0;
@@ -568,6 +609,40 @@ static int audio_capture_eraser_enable_ctl_set(struct snd_kcontrol *kcontrol,
 	if (err < 0)
 		pr_err("ERR:%d capture eraser %s fail\n", err,
 		       (chip->capture_eraser_enable) ? "Enable" : "Disable");
+
+	mutex_unlock(&chip->audio_mutex);
+	return err;
+}
+
+static int audio_cca_module_load_ctl_get(struct snd_kcontrol *kcontrol,
+					       struct snd_ctl_elem_value *ucontrol)
+{
+	struct aoc_chip *chip = snd_kcontrol_chip(kcontrol);
+
+	if (mutex_lock_interruptible(&chip->audio_mutex))
+		return -EINTR;
+
+	ucontrol->value.integer.value[0] = chip->cca_module_loaded;
+
+	mutex_unlock(&chip->audio_mutex);
+
+	return 0;
+}
+
+static int audio_cca_module_load_ctl_set(struct snd_kcontrol *kcontrol,
+					       struct snd_ctl_elem_value *ucontrol)
+{
+	struct aoc_chip *chip = snd_kcontrol_chip(kcontrol);
+	int err = 0;
+
+	if (mutex_lock_interruptible(&chip->audio_mutex))
+		return -EINTR;
+
+	chip->cca_module_loaded = ucontrol->value.integer.value[0];
+	err = aoc_load_cca_module(chip, chip->cca_module_loaded);
+	if (err < 0)
+		pr_err("ERR:%d %s CCA fail\n", err,
+		       (chip->cca_module_loaded) ? "Load" : "Unload");
 
 	mutex_unlock(&chip->audio_mutex);
 	return err;
@@ -1546,7 +1621,8 @@ static SOC_ENUM_SINGLE_DECL(builtin_mic_process_mode_enum, 1, 0,
 static const char *bt_mode_texts[] = { "Unconfigured", "SCO",
 				       "ESCO",	       "A2DP_RAW",
 				       "A2DP_ENC_SBC", "A2DP_ENC_AAC",
-				       "A2DP_ENC_LC3", "BLE_ENC_LC3" };
+				       "A2DP_ENC_LC3", "BLE_ENC_LC3",
+				       "BLE_CONVERSATION" };
 static SOC_ENUM_SINGLE_DECL(bt_mode_enum, 1, SINK_BT, bt_mode_texts);
 
 /* TODO: seek better way to create a series of controls  */
@@ -1649,6 +1725,17 @@ static struct snd_kcontrol_new snd_aoc_ctl[] = {
 		.info = snd_aoc_ctl_info,
 		.get = snd_aoc_buildin_mic_capture_list_ctl_get,
 		.put = snd_aoc_buildin_mic_capture_list_ctl_put,
+		.count = 1,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "BUILDIN US MIC ID CAPTURE LIST",
+		.index = 0,
+		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
+		.private_value = BUILDIN_US_MIC_CAPTURE_LIST,
+		.info = snd_aoc_ctl_info,
+		.get = snd_aoc_buildin_us_mic_capture_list_ctl_get,
+		.put = snd_aoc_buildin_us_mic_capture_list_ctl_put,
 		.count = 1,
 	},
 	{
@@ -1898,6 +1985,9 @@ static struct snd_kcontrol_new snd_aoc_ctl[] = {
 
 	SOC_SINGLE_EXT("PCM Stream Wait Time in MSec", SND_SOC_NOPM, 0, 1000000, 0, pcm_wait_time_get,
 		       pcm_wait_time_set),
+
+	SOC_SINGLE_EXT("CCA Module Load", SND_SOC_NOPM, 0, 1, 0,
+		       audio_cca_module_load_ctl_get, audio_cca_module_load_ctl_set),
 
 	SOC_SINGLE_EXT("Voice PCM Stream Wait Time in MSec", SND_SOC_NOPM, 0, 1000000, 0,
 		voice_pcm_wait_time_get, voice_pcm_wait_time_set),

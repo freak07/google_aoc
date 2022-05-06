@@ -11,6 +11,8 @@
 
 #include "aoc_alsa.h"
 #include "aoc_alsa_drv.h"
+#include "aoc_alsa_path.h"
+
 #include <linux/modem_notifier.h>
 
 #ifndef ALSA_AOC_CMD_LOG_DISABLE
@@ -18,6 +20,9 @@ static int cmd_count;
 #endif
 
 #define DEFAULT_TELEPHONY_MIC PORT_INCALL_TX
+
+extern struct be_path_cache port_array[PORT_MAX];
+
 /*
  * TODO: TDM/I2S will be removed from port naming and will be replaced
  * by sink-associated devices such as spker, headphone, bt, usb, mode
@@ -32,6 +37,7 @@ static aoc_audio_sink[] = {
 	[PORT_BT_RX] = SINK_BT,           [PORT_BT_TX] = -1,
 	[PORT_INCALL_RX] = -1,            [PORT_INCALL_TX] = -1,
 	[PORT_INTERNAL_MIC] = -1,	  [PORT_HAPTIC_RX] = SINK_SPEAKER,
+	[PORT_INTERNAL_MIC_US] = -1,
 };
 
 static int hw_id_to_sink(int hw_idx)
@@ -45,7 +51,18 @@ static int hw_id_to_sink(int hw_idx)
 static int ep_id_to_source(int ep_idx)
 {
 	/* TODO: refactor needed. Haptics pcm dev id: 7, its entrypoint is 10(HAPTICS) */
-	return (ep_idx == IDX_EP8) ? HAPTICS : (ep_idx == IDX_HIFI) ? USB_HIFI : (ep_idx == IDX_US) ? SPEAKER_US : ep_idx;
+	switch (ep_idx) {
+	case IDX_EP8:
+		return HAPTICS;
+	case IDX_HIFI:
+		return USB_HIFI;
+	case IDX_US:
+		return SPEAKER_US;
+	case IDX_IMS:
+		return IMMERSIVE;
+	default:
+		return ep_idx;
+	}
 }
 
 static bool ap_filter_capture_stream(struct aoc_alsa_stream *alsa_stream)
@@ -128,6 +145,7 @@ static aoc_audio_stream_type[] = {
 	[15] = NORMAL, [16] = NORMAL,  [17] = NORMAL,	   [18] = INCALL, [19] = INCALL,
 	[20] = INCALL, [21] = INCALL,  [22] = INCALL,	   [23] = MMAPED, [24] = NORMAL,
 	[25] = HIFI,   [26] = HIFI,    [27] = ANDROID_AEC, [28] = MMAPED, [29] = INCALL,
+	[30] = NORMAL,
 };
 
 int aoc_pcm_device_to_stream_type(int device)
@@ -304,31 +322,47 @@ int aoc_audio_volume_set(struct aoc_chip *chip, uint32_t volume, int src,
 }
 
 static int aoc_audio_capture_mic_input(struct aoc_chip *chip,
-				 int input_cmd, int mic_input_source)
+				       int input_cmd, int mic_input_source)
 {
 	int err;
-	struct CMD_HDR cmd0; /* For ap mic input STOP */
 	struct CMD_AUDIO_INPUT_AP_INPUT_START cmd1;
 
 	if (input_cmd == START) {
-		AocCmdHdrSet(&(cmd1.parent),
-			     CMD_AUDIO_INPUT_AP_INPUT_START_ID,
+		AocCmdHdrSet(&(cmd1.parent), CMD_AUDIO_INPUT_AP_INPUT_START_ID,
 			     sizeof(cmd1));
 
 		cmd1.mic_input_source = mic_input_source;
-		err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd1,
-					sizeof(cmd1), NULL, chip);
+		err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd1, sizeof(cmd1),
+			NULL, chip);
 		if (err < 0)
 			pr_err("ERR:%d audio capture mic input start fail!\n", err);
 
 	} else {
-		AocCmdHdrSet(&cmd0, CMD_AUDIO_INPUT_AP_INPUT_STOP_ID,
-			     sizeof(cmd0));
-
-		err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd0,
-					sizeof(cmd0), NULL, chip);
+		err = aoc_audio_control_simple_cmd(CMD_INPUT_CHANNEL,
+			CMD_AUDIO_INPUT_AP_INPUT_STOP_ID, chip);
 		if (err < 0)
 			pr_err("ERR:%d audio capture mic input stop fail!\n", err);
+	}
+
+	return err;
+}
+
+static int aoc_audio_us_capture_mic_input(struct aoc_chip *chip, int input_cmd)
+{
+	int err;
+
+	if (input_cmd == START) {
+		err = aoc_audio_control_simple_cmd(
+			CMD_INPUT_CHANNEL, CMD_AUDIO_INPUT_ULTRASONIC_CAPTURE_START_ID,
+			chip);
+		if (err < 0)
+			pr_err("ERR:%d audio us capture mic input start fail!\n", err);
+
+	} else {
+		err = aoc_audio_control_simple_cmd(CMD_INPUT_CHANNEL,
+			CMD_AUDIO_INPUT_ULTRASONIC_CAPTURE_STOP_ID, chip);
+		if (err < 0)
+			pr_err("ERR:%d audio us capture mic input stop fail!\n", err);
 	}
 
 	return err;
@@ -383,14 +417,43 @@ int aoc_audio_capture_mic_close(struct aoc_chip *chip)
 	return 0;
 }
 
-int aoc_audio_capture_active_stream_num(struct aoc_chip *chip)
+static int aoc_audio_us_capture_mic_prepare(struct aoc_chip *chip)
 {
-	return (int)hweight64((uint64_t)(chip->opened & AOC_CAPUTRE_DEVICE_MASK));
+	int err = 0;
+
+	err = aoc_audio_us_capture_mic_input(chip, START);
+	if (err < 0)
+		pr_err("ERR:%d in audio us capture mic input setup start\n", err);
+
+	return err;
 }
 
-int aoc_audio_capture_param_configured_num(struct aoc_chip *chip)
+static int aoc_audio_us_capture_mic_close(struct aoc_chip *chip)
 {
-	return (int)hweight64((uint64_t)(chip->capture_param_set & AOC_CAPUTRE_DEVICE_MASK));
+	int err = 0;
+
+	err = aoc_audio_us_capture_mic_input(chip, STOP);
+	if (err < 0) {
+		pr_err("ERR:%d in audio us capture mic input stop\n", err);
+		return err;
+	}
+
+	return 0;
+}
+
+int aoc_audio_capture_active_stream_num(struct aoc_chip *chip)
+{
+	return (int)hweight64((uint64_t)(chip->opened & AOC_AUDIO_CAPUTRE_DEVICE_MASK));
+}
+
+static int aoc_record_param_configured_num(struct aoc_chip *chip)
+{
+	return (int)hweight64((uint64_t)(chip->capture_param_set & AOC_AUDIO_CAPUTRE_DEVICE_MASK));
+}
+
+static int aoc_us_record_param_configured_num(struct aoc_chip *chip)
+{
+	return (int)hweight64((uint64_t)(chip->capture_param_set & AOC_ULTRASONIC_CAPUTRE_DEVICE_MASK));
 }
 
 int aoc_set_builtin_mic_power_state(struct aoc_chip *chip, int iMic, int state)
@@ -1244,10 +1307,14 @@ static int aoc_raw_capture_trigger(struct aoc_alsa_stream *alsa_stream, int reco
 	return 0;
 }
 
-static int aoc_audio_capture_mic_process_mode(struct aoc_chip *chip)
+static int aoc_audio_capture_mic_process_mode(struct aoc_chip *chip,
+					      struct aoc_alsa_stream *alsa_stream)
 {
 	int err;
 	struct CMD_AUDIO_INPUT_GET_AP_MIC_INDEX cmd;
+
+	if (alsa_stream->idx == UC_ULTRASONIC_RECORD)
+		return 0;
 
 	AocCmdHdrSet(&(cmd.parent), CMD_AUDIO_INPUT_SET_AP_MIC_INDEX_ID, sizeof(cmd));
 
@@ -1265,8 +1332,8 @@ static int aoc_audio_capture_mic_process_mode(struct aoc_chip *chip)
 	return 0;
 }
 
-static int aoc_audio_capture_runtime_control(struct aoc_alsa_stream *alsa_stream,
-	 int dst, bool on, bool be_on)
+static int aoc_audio_capture_runtime_control(struct aoc_alsa_stream *alsa_stream, int dst, bool on,
+					     bool be_on)
 {
 	int err;
 	struct aoc_chip *chip = alsa_stream->chip;
@@ -1275,15 +1342,15 @@ static int aoc_audio_capture_runtime_control(struct aoc_alsa_stream *alsa_stream
 		return 0;
 
 	if (on) {
-		err = aoc_audio_capture_mic_process_mode(chip);
+		err = aoc_audio_capture_mic_process_mode(chip, alsa_stream);
 		if (err < 0)
 			return err;
 
-		err = ap_data_control_trigger(chip, START);
+		err = ap_data_control_trigger(chip, alsa_stream, START);
 		if (err < 0)
 			return err;
 	} else {
-		err = ap_data_control_trigger(chip, STOP);
+		err = ap_data_control_trigger(chip, alsa_stream, STOP);
 		if (err < 0)
 			return err;
 	}
@@ -1328,16 +1395,23 @@ static int aoc_mmap_capture_runtime_control(struct aoc_alsa_stream *alsa_stream,
 	return 0;
 }
 
-int ap_data_control_trigger(struct aoc_chip *chip, int record_cmd)
+int ap_data_control_trigger(struct aoc_chip *chip, struct aoc_alsa_stream *alsa_stream,
+			    int record_cmd)
 {
 	int err = 0;
 	struct CMD_HDR cmd;
+	int cmd_id;
 
 	/* We don't support the stop_data yet */
 	if (record_cmd != START)
 		return 0;
 
-	AocCmdHdrSet(&cmd, CMD_AUDIO_INPUT_MIC_RECORD_AP_START_DATA_ID, sizeof(cmd));
+	if (alsa_stream->idx == UC_ULTRASONIC_RECORD)
+		cmd_id = CMD_AUDIO_INPUT_ULTRASONIC_AP_START_ID;
+	else
+		cmd_id = CMD_AUDIO_INPUT_MIC_RECORD_AP_START_DATA_ID;
+
+	AocCmdHdrSet(&cmd, cmd_id, sizeof(cmd));
 
 	err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd, sizeof(cmd), NULL, chip);
 	if (err < 0) {
@@ -1346,25 +1420,29 @@ int ap_data_control_trigger(struct aoc_chip *chip, int record_cmd)
 	return err;
 }
 
-int ap_record_stop(struct aoc_chip *chip)
+int ap_record_stop(struct aoc_chip *chip, struct aoc_alsa_stream *alsa_stream)
 {
 	int err = 0;
-	struct CMD_HDR cmd;
+	int cmd_id;
 
-	AocCmdHdrSet(&cmd, CMD_AUDIO_INPUT_AP_INPUT_STOP_ID, sizeof(cmd));
+	if (alsa_stream->idx == UC_ULTRASONIC_RECORD)
+		cmd_id = CMD_AUDIO_INPUT_ULTRASONIC_CAPTURE_STOP_ID;
+	else
+		cmd_id = CMD_AUDIO_INPUT_AP_INPUT_STOP_ID;
 
-	err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd, sizeof(cmd), NULL, chip);
+	err = aoc_audio_control_simple_cmd(CMD_INPUT_CHANNEL, cmd_id, chip);
+
 	if (err < 0) {
 		pr_err("ERR:%d in audio input mic record start/stop\n", err);
 	}
 	return err;
 }
 
-int aoc_capture_filter_runtime_control(struct aoc_chip *chip, uint32_t port_id, bool on)
+static int aoc_record_filter_runtime_control(struct aoc_chip *chip, uint32_t port_id, bool on)
 {
 	int err;
 
-	if (aoc_audio_capture_param_configured_num(chip) == 0)
+	if (aoc_record_param_configured_num(chip) == 0)
 		return 0;
 
 	pr_info("%s: port 0x%x runtime %d", __func__, port_id, on);
@@ -1377,8 +1455,34 @@ int aoc_capture_filter_runtime_control(struct aoc_chip *chip, uint32_t port_id, 
 	return err;
 }
 
-int aoc_audio_capture_runtime_trigger(struct aoc_chip *chip, int ep_id,
-	 int dst, bool on)
+static int aoc_us_record_filter_runtime_control(struct aoc_chip *chip, uint32_t port_id, bool on)
+{
+	int err;
+
+	if (aoc_us_record_param_configured_num(chip) == 0)
+		return 0;
+
+	pr_info("%s: port 0x%x runtime %d", __func__, port_id, on);
+	if (on) {
+		err = aoc_audio_us_capture_mic_prepare(chip);
+	} else {
+		err = aoc_audio_us_capture_mic_close(chip);
+	}
+
+	return err;
+}
+
+int aoc_capture_filter_runtime_control(struct aoc_chip *chip, uint32_t port_id, bool on)
+{
+	switch (port_id) {
+	case INTERNAL_MIC_US_TX:
+		return aoc_us_record_filter_runtime_control(chip, port_id, on);
+	default:
+		return aoc_record_filter_runtime_control(chip, port_id, on);
+	}
+}
+
+int aoc_audio_capture_runtime_trigger(struct aoc_chip *chip, int ep_id, int dst, bool on)
 {
 	struct aoc_alsa_stream *alsa_stream;
 
@@ -1392,6 +1496,7 @@ int aoc_audio_capture_runtime_trigger(struct aoc_chip *chip, int ep_id,
 	pr_info("%s: on %d idx %d", __func__, on, alsa_stream->idx);
 
 	switch (alsa_stream->idx) {
+	case UC_ULTRASONIC_RECORD:
 	case UC_AUDIO_RECORD:
 		return aoc_audio_capture_runtime_control(alsa_stream, dst, on, true);
 	case UC_MMAP_RECORD:
@@ -1416,6 +1521,7 @@ static int aoc_audio_capture_path_bind(struct aoc_chip *chip, int ep_id,
 		return 0;
 
 	switch (alsa_stream->idx) {
+	case UC_ULTRASONIC_RECORD:
 	case UC_AUDIO_RECORD:
 		return aoc_audio_capture_runtime_control(alsa_stream, dst, on, be_on);
 	case UC_MMAP_RECORD:
@@ -1560,17 +1666,23 @@ static int aoc_audio_playback_set_params(struct aoc_alsa_stream *alsa_stream,
 	return err;
 }
 
-static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
-					uint32_t channels, uint32_t samplerate,
-					uint32_t bps, bool pcm_float_fmt)
+static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream, uint32_t channels,
+					uint32_t samplerate, uint32_t bps, bool pcm_float_fmt)
 {
 	int err = 0;
 	struct CMD_AUDIO_INPUT_MIC_RECORD_AP_SET_PARAMS cmd;
+	int cmd_id;
 	struct aoc_chip *chip = alsa_stream->chip;
 	int i, mic_id;
 
+	if (alsa_stream->idx < 0 || alsa_stream->idx >= sizeof(chip->capture_param_set) * 8) {
+		pr_err("ERR: idx %d over capture_param_set maximum\n", alsa_stream->idx);
+		return -EINVAL;
+	}
+
 	/* Regular audio capture should be the primary setting of the single ap filter */
-	if (chip->capture_param_set & (1 << UC_AUDIO_RECORD)) {
+	if ((alsa_stream->idx != UC_ULTRASONIC_RECORD) &&
+	    (chip->capture_param_set & (1 << UC_AUDIO_RECORD))) {
 		pr_info("%s: ignore capture set param 0x%x", __func__, chip->capture_param_set);
 		chip->capture_param_set |= (1 << alsa_stream->idx);
 
@@ -1581,8 +1693,11 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 		return err;
 	}
 
-	AocCmdHdrSet(&(cmd.parent), CMD_AUDIO_INPUT_MIC_RECORD_AP_SET_PARAMS_ID,
-		     sizeof(cmd));
+	if (alsa_stream->idx == UC_ULTRASONIC_RECORD)
+		cmd_id = CMD_AUDIO_INPUT_ULTRASONIC_AP_SET_PARAMS_ID;
+	else
+		cmd_id = CMD_AUDIO_INPUT_MIC_RECORD_AP_SET_PARAMS_ID;
+	AocCmdHdrSet(&(cmd.parent), cmd_id, sizeof(cmd));
 
 	/* TODO: the output of spatial module is stereo */
 	if (channels < 1 || channels > NUM_OF_BUILTIN_MIC) {
@@ -1593,12 +1708,23 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 
 	/* TODO: update this after DSP supports the runtime configuration */
 	cmd.pdm_mask = 0;
-	for (i = 0; i < ARRAY_SIZE(chip->buildin_mic_id_list); i++) {
-		cmd.interleaving[i] = 0xff;
-		mic_id = chip->buildin_mic_id_list[i];
-		if (mic_id != -1) {
-			cmd.interleaving[i] = mic_id;
-			cmd.pdm_mask = cmd.pdm_mask | (1 << mic_id);
+	if (alsa_stream->idx == UC_ULTRASONIC_RECORD) {
+		for (i = 0; i < ARRAY_SIZE(chip->buildin_us_mic_id_list); i++) {
+			cmd.interleaving[i] = 0xff;
+			mic_id = chip->buildin_us_mic_id_list[i];
+			if (mic_id != -1) {
+				cmd.interleaving[i] = mic_id;
+				cmd.pdm_mask = cmd.pdm_mask | (1 << mic_id);
+			}
+		}
+	} else {
+		for (i = 0; i < ARRAY_SIZE(chip->buildin_mic_id_list); i++) {
+			cmd.interleaving[i] = 0xff;
+			mic_id = chip->buildin_mic_id_list[i];
+			if (mic_id != -1) {
+				cmd.interleaving[i] = mic_id;
+				cmd.pdm_mask = cmd.pdm_mask | (1 << mic_id);
+			}
 		}
 	}
 
@@ -1606,6 +1732,9 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 	cmd.num_periods = 4; /*TODO: how to make it configuratable*/
 
 	switch (samplerate) {
+	case 96000:
+		cmd.sample_rate = SR_96KHZ;
+		break;
 	case 48000:
 		cmd.sample_rate = SR_48KHZ;
 		break;
@@ -1639,10 +1768,8 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 	default:
 		cmd.requested_format.bits = WIDTH_32_BIT;
 	}
-	cmd.requested_format.sr =
-		cmd.sample_rate; /* TODO: double check format*/
-	cmd.requested_format.format =
-		(pcm_float_fmt) ? FRMT_FLOATING_POINT : FRMT_FIXED_POINT;
+	cmd.requested_format.sr = cmd.sample_rate; /* TODO: double check format*/
+	cmd.requested_format.format = (pcm_float_fmt) ? FRMT_FLOATING_POINT : FRMT_FIXED_POINT;
 
 	cmd.requested_format.chan = channels;
 
@@ -1651,8 +1778,7 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 	else
 		cmd.mic_process_index = AP_MIC_PROCESS_RAW;
 
-	err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd, sizeof(cmd),
-				NULL, chip);
+	err = aoc_audio_control(CMD_INPUT_CHANNEL, (uint8_t *)&cmd, sizeof(cmd), NULL, chip);
 	if (err < 0) {
 		pr_err("ERR:%d in capture parameter setup\n", err);
 		goto exit;
@@ -1660,10 +1786,17 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 
 	chip->capture_param_set |= (1 << alsa_stream->idx);
 
-	/* Start the pdm/usb/bt mic */
-	err = aoc_audio_capture_mic_prepare(chip);
-	if (err < 0)
-		pr_err("ERR:%d in audio capture mic prepare\n", err);
+	if (alsa_stream->idx == UC_ULTRASONIC_RECORD) {
+		/* Start the ultrasound mic */
+		err = aoc_audio_us_capture_mic_prepare(chip);
+		if (err < 0)
+			pr_err("ERR:%d in audio us capture mic prepare\n", err);
+	} else {
+		/* Start the pdm/usb/bt mic */
+		err = aoc_audio_capture_mic_prepare(chip);
+		if (err < 0)
+			pr_err("ERR:%d in audio capture mic prepare\n", err);
+	}
 
 	pr_debug("Flush aoc ring buffer\n");
 	if (!aoc_ring_flush_read_data(alsa_stream->dev->service, AOC_UP, 0)) {
@@ -1683,8 +1816,8 @@ static int aoc_audio_capture_set_params(struct aoc_alsa_stream *alsa_stream,
 		}
 
 		if (chip->capture_param_set & (1 << UC_LOW_LATENCY_AUDIO_RECORD)) {
-			target_alsa_stream = find_alsa_stream_by_device_idx(chip,
-				UC_LOW_LATENCY_AUDIO_RECORD);
+			target_alsa_stream =
+				find_alsa_stream_by_device_idx(chip, UC_LOW_LATENCY_AUDIO_RECORD);
 			if (target_alsa_stream && target_alsa_stream->running) {
 				aoc_raw_capture_trigger(alsa_stream, START);
 			}
@@ -1733,7 +1866,7 @@ static int aoc_audio_capture_trigger(struct aoc_alsa_stream *alsa_stream, int re
 	pr_info("%s: %d", __func__, record_cmd);
 
 	if (alsa_stream->stream_type == NORMAL) {
-		err = ap_data_control_trigger(chip, record_cmd);
+		err = ap_data_control_trigger(chip, alsa_stream, record_cmd);
 		if (err < 0)
 			goto exit;
 	}
@@ -1958,6 +2091,17 @@ int aoc_audio_capture_eraser_enable(struct aoc_chip *chip, long enable)
 	return 0;
 }
 
+int aoc_load_cca_module(struct aoc_chip *chip, long load)
+{
+	int cmd_id, err = 0;
+
+	cmd_id = (load == 1) ? CMD_AUDIO_OUTPUT_VOICE_CCA_START_ID :
+				       CMD_AUDIO_OUTPUT_VOICE_CCA_STOP_ID;
+	err = aoc_audio_control_simple_cmd(CMD_OUTPUT_CHANNEL, cmd_id, chip);
+
+	return err;
+}
+
 int aoc_lvm_enable_get(struct aoc_chip *chip, long *enable)
 {
 	int err;
@@ -2093,6 +2237,18 @@ int aoc_compr_offload_linear_gain_set(struct aoc_chip *chip, long *val)
 
 	cmd.ch_gains[0] = val[0];
 	cmd.ch_gains[1] = val[1];
+
+	if (val[0] == 0 && val[1] == 0) {
+		err = aoc_audio_control_simple_cmd(CMD_OUTPUT_CHANNEL,
+						CMD_AUDIO_OUTPUT_DEC_RESET_CURRENT_GAIN_ID,
+						chip);
+		if (err < 0) {
+			pr_err("ERR:%d in aoc compr reset gain\n", err);
+			return err;
+		}
+		/* To allow the reset finished in aoc */
+		msleep(100);
+	}
 
 	/* Send cmd to AOC */
 	err = aoc_audio_control(CMD_OUTPUT_CHANNEL, (uint8_t *)&cmd, sizeof(cmd), NULL, chip);
@@ -3124,7 +3280,7 @@ int aoc_compr_offload_setup(struct aoc_alsa_stream *alsa_stream, int type)
 	return 0;
 }
 
-int aoc_compr_offload_get_io_samples(struct aoc_alsa_stream *alsa_stream)
+int aoc_compr_offload_get_io_samples(struct aoc_alsa_stream *alsa_stream, uint64_t *sample)
 {
 	int err;
 	struct CMD_AUDIO_OUTPUT_GET_EP_SAMPLES cmd;
@@ -3139,8 +3295,10 @@ int aoc_compr_offload_get_io_samples(struct aoc_alsa_stream *alsa_stream)
 	if (err < 0)
 		pr_err("ERR:%d in getting compress offload io-sample number\n",
 		       err);
+	else
+		*sample = cmd.samples;
 
-	return err < 0 ? err : cmd.samples;
+	return err < 0 ? err : 0;
 }
 
 int aoc_compr_offload_flush_buffer(struct aoc_alsa_stream *alsa_stream)
@@ -3220,20 +3378,25 @@ int aoc_audio_close(struct aoc_alsa_stream *alsa_stream)
 	struct snd_pcm_substream *substream = alsa_stream->substream;
 
 	/* To deal with recording with spatial module enabled */
-	if (substream && substream->stream == SNDRV_PCM_STREAM_CAPTURE &&
-		ap_filter_capture_stream(alsa_stream)) {
-		if (chip->mic_spatial_module_enable && !aoc_pcm_is_mmap_raw(alsa_stream)) {
-			err = aoc_audio_capture_spatial_module_trigger(chip, STOP);
-			if (err < 0)
-				pr_err("ERR:%d mic proc spatial module failed to stop!\n", err);
-		}
+	if (substream && substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
+		if (alsa_stream->idx == UC_ULTRASONIC_RECORD)
+			ap_record_stop(chip, alsa_stream);
+		else if (ap_filter_capture_stream(alsa_stream)) {
+			/* Disable spatial module */
+			if (chip->mic_spatial_module_enable && !aoc_pcm_is_mmap_raw(alsa_stream)) {
+				err = aoc_audio_capture_spatial_module_trigger(chip, STOP);
+				if (err < 0)
+					pr_err("ERR:%d mic proc spatial module failed to stop!\n",
+					       err);
+			}
 
-		if (aoc_audio_capture_active_stream_num(chip) == 0) {
-			pr_info("%s: record stop\n", __func__);
-			ap_record_stop(chip);
+			/* Stop the capturing mic*/
+			if (aoc_audio_capture_active_stream_num(chip) == 0) {
+				pr_info("%s: record stop\n", __func__);
+				ap_record_stop(chip, alsa_stream);
+			}
 		}
 	}
-
 	return 0;
 }
 
@@ -3244,7 +3407,7 @@ static void print_enc_param(struct AUDIO_OUTPUT_BT_A2DP_ENC_CFG *enc_cfg)
 	pr_info("codecType = %x\n", enc_cfg->codecType);
 	pr_info("bitrate = %x\n", enc_cfg->bitrate);
 	pr_info("peerMTU = %x\n", enc_cfg->peerMTU);
-	for (i = 0;i < 6;i ++)
+	for (i = 0; i < 6; i++)
 		pr_info("  params[%d] = %x\n", i, enc_cfg->params[i]);
 }
 
@@ -3253,14 +3416,12 @@ int aoc_a2dp_set_enc_param(struct aoc_chip *chip, struct AUDIO_OUTPUT_BT_A2DP_EN
 	int err = 0;
 	struct CMD_AUDIO_OUTPUT_BT_A2DP_ENC_CFG cmd;
 
-	AocCmdHdrSet(&(cmd.parent), CMD_AUDIO_OUTPUT_BT_A2DP_ENC_CFG_ID,
-		     sizeof(cmd));
+	AocCmdHdrSet(&(cmd.parent), CMD_AUDIO_OUTPUT_BT_A2DP_ENC_CFG_ID, sizeof(cmd));
 	memcpy(&cmd.bt_a2dp_enc_cfg, cfg, sizeof(*cfg));
 
 	print_enc_param(&cmd.bt_a2dp_enc_cfg);
 
-	err = aoc_audio_control(CMD_OUTPUT_CHANNEL, (uint8_t *)&cmd,
-				sizeof(cmd), (uint8_t *)&cmd,
+	err = aoc_audio_control(CMD_OUTPUT_CHANNEL, (uint8_t *)&cmd, sizeof(cmd), (uint8_t *)&cmd,
 				chip);
 
 	if (err < 0)
@@ -3273,14 +3434,12 @@ int aoc_audio_us_record(struct aoc_chip *chip, bool enable)
 {
 	int cmd_id, err = 0;
 
-	cmd_id = enable ? CMD_AUDIO_INPUT_DIRECT_ULTRASONIC_CAPTURE_ENABLE_ID:
-				CMD_AUDIO_INPUT_DIRECT_ULTRASONIC_CAPTURE_DISABLE_ID;
+	cmd_id = enable ? CMD_AUDIO_INPUT_DIRECT_ULTRASONIC_CAPTURE_ENABLE_ID :
+			  CMD_AUDIO_INPUT_DIRECT_ULTRASONIC_CAPTURE_DISABLE_ID;
 
 	err = aoc_audio_control_simple_cmd(CMD_INPUT_CHANNEL, cmd_id, chip);
 	if (err < 0)
-		pr_err("ERR:%d in ultra sonic record %s control\n",
-			err, enable ? "start":"stop");
+		pr_err("ERR:%d in ultra sonic record %s control\n", err, enable ? "start" : "stop");
 
 	return err;
 }
-
