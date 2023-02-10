@@ -110,9 +110,6 @@ enum uc_device_id {
 
 #define NULL_PATH -1
 
-/* Define trigger aoc watchdog reason */
-#define ALSA_CTL_TIMEOUT "alsa_ctl_timeout"
-
 /* TODO: Copied from AoC repo and will be removed */
 enum bluetooth_mode {
 	AHS_BT_MODE_UNCONFIGURED = 0,
@@ -124,6 +121,7 @@ enum bluetooth_mode {
 	AHS_BT_MODE_A2DP_ENC_LC3,
 	AHS_BT_MODE_BLE_ENC_LC3,
 	AHS_BT_MODE_BLE_CONVERSATION,
+	AHS_BT_MODE_A2DP_ENC_OPUS,
 };
 
 enum TelephonyModes {
@@ -182,7 +180,7 @@ enum aoc_playback_entry_point {
 	IMMERSIVE = 15,
 };
 
-enum { NORMAL = 0, MMAPED, RAW, INCALL, HIFI, ANDROID_AEC, COMPRESS };
+enum { NORMAL = 0, MMAPED, RAW, INCALL, HIFI, ANDROID_AEC, COMPRESS, CAP_INJ };
 
 enum { BUILTIN_MIC0 = 0, BUILTIN_MIC1, BUILTIN_MIC2, BUILTIN_MIC3 };
 enum { MIC_LOW_POWER_GAIN = 0, MIC_HIGH_POWER_GAIN, MIC_CURRENT_GAIN };
@@ -266,6 +264,7 @@ struct aoc_alsa_stream {
 	int compr_offload_codec;
 	int gapless_offload_enable;
 	int send_metadata;
+	int eof_reach;
 	uint32_t compr_padding;
 	uint32_t compr_delay;
 	uint64_t compr_pcm_io_sample_base;

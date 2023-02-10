@@ -866,9 +866,9 @@ static int compr_offload_volume_set(struct snd_kcontrol *kcontrol,
 	chip->compr_offload_volume = ucontrol->value.integer.value[0];
 
 	/* temporary solution */
-	aoc_audio_volume_set(chip, chip->compr_offload_volume, OFF_LOAD, SINK_SPEAKER);
-	aoc_audio_volume_set(chip, chip->compr_offload_volume, OFF_LOAD, SINK_USB);
-	aoc_audio_volume_set(chip, chip->compr_offload_volume, OFF_LOAD, SINK_BT);
+	aoc_audio_volume_set(chip, chip->compr_offload_volume, OFF_LOAD, ASNK_SPEAKER);
+	aoc_audio_volume_set(chip, chip->compr_offload_volume, OFF_LOAD, ASNK_USB);
+	aoc_audio_volume_set(chip, chip->compr_offload_volume, OFF_LOAD, ASNK_BT);
 
 	mutex_unlock(&chip->audio_mutex);
 	return 0;
@@ -1690,7 +1690,7 @@ static const char *bt_mode_texts[] = { "Unconfigured", "SCO",
 				       "ESCO",	       "A2DP_RAW",
 				       "A2DP_ENC_SBC", "A2DP_ENC_AAC",
 				       "A2DP_ENC_LC3", "BLE_ENC_LC3",
-				       "BLE_CONVERSATION" };
+				       "BLE_CONVERSATION", "A2DP_ENC_OPUS" };
 static SOC_ENUM_SINGLE_DECL(bt_mode_enum, 1, SINK_BT, bt_mode_texts);
 
 /* TODO: seek better way to create a series of controls  */

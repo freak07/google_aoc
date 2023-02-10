@@ -268,6 +268,7 @@ static unsigned long write_blocked_mask;
 static bool aoc_fpga_reset(struct aoc_prvdata *prvdata);
 static bool write_reset_trampoline(u32 addr);
 static bool aoc_a32_reset(void);
+static bool configure_sensor_regulator(struct aoc_prvdata *prvdata, bool enable);
 static int aoc_watchdog_restart(struct aoc_prvdata *prvdata);
 static void acpm_aoc_reset_callback(unsigned int *cmd, unsigned int size);
 
@@ -1036,10 +1037,7 @@ ssize_t aoc_service_read_timeout(struct aoc_service_dev *dev, uint8_t *buffer,
 	if (dev->dead)
 		return -ENODEV;
 
-	if (!aoc_platform_device)
-		return -ENODEV;
-
-	prvdata = platform_get_drvdata(aoc_platform_device);
+	prvdata = dev_get_drvdata(dev->dev.parent);
 	if (!prvdata)
 		return -ENODEV;
 
@@ -1197,10 +1195,7 @@ ssize_t aoc_service_write_timeout(struct aoc_service_dev *dev, const uint8_t *bu
 	if (dev->dead)
 		return -ENODEV;
 
-	if (!aoc_platform_device)
-		return -ENODEV;
-
-	prvdata = platform_get_drvdata(aoc_platform_device);
+	prvdata = dev_get_drvdata(dev->dev.parent);
 	if (!prvdata)
 		return -ENODEV;
 
@@ -1764,6 +1759,22 @@ static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR_WO(reset);
 
+static ssize_t sensor_power_enable_store(struct device *dev,
+                                         struct device_attribute *attr,
+                                         const char *buf, size_t count)
+{
+	struct aoc_prvdata *prvdata = dev_get_drvdata(dev);
+	int val;
+
+	if (kstrtoint(buf, 10, &val) == 0) {
+		dev_info(prvdata->dev,"sensor_power_enable %d", val);
+		configure_sensor_regulator(prvdata, !!val);
+	}
+	return count;
+}
+
+static DEVICE_ATTR_WO(sensor_power_enable);
+
 static struct attribute *aoc_attrs[] = {
 	&dev_attr_firmware.attr,
 	&dev_attr_revision.attr,
@@ -1774,6 +1785,7 @@ static struct attribute *aoc_attrs[] = {
 	&dev_attr_aoc_clock.attr,
 	&dev_attr_aoc_clock_and_kernel_boottime.attr,
 	&dev_attr_reset.attr,
+	&dev_attr_sensor_power_enable.attr,
 	NULL
 };
 
@@ -2140,6 +2152,7 @@ static void aoc_monitor_online(struct work_struct *work)
 	if (aoc_state == AOC_STATE_FIRMWARE_LOADED) {
 		dev_err(prvdata->dev, "aoc init no respond, try restart\n");
 
+		disable_irq_nosync(prvdata->watchdog_irq);
 		aoc_take_offline(prvdata);
 		restart_rc = aoc_watchdog_restart(prvdata);
 		if (restart_rc)
